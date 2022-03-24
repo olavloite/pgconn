@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"github.com/jackc/pgproto3"
 	"io"
 	"math"
 	"net"
@@ -768,8 +769,24 @@ type StatementDescription struct {
 }
 
 // Prepare creates a prepared statement. If the name is empty, the anonymous prepared statement will be used. This
-// allows Prepare to also to describe statements without creating a server-side prepared statement.
+// allows Prepare to also describe statements without creating a server-side prepared statement.
 func (pgConn *PgConn) Prepare(ctx context.Context, name, sql string, paramOIDs []uint32) (*StatementDescription, error) {
+	return pgConn.prepare(ctx, name, sql, paramOIDs, modeParseAndDescribe)
+}
+
+// Parse creates a prepared statement using only the parameter OIDs that are given to the function. It will not ask the
+// server to describe the statement. If the name is empty, the anonymous prepared statement will be used. This
+// allows Parse to also describe statements without creating a server-side prepared statement.
+func (pgConn *PgConn) Parse(ctx context.Context, name, sql string, paramOIDs []uint32) (*StatementDescription, error) {
+	return pgConn.prepare(ctx, name, sql, paramOIDs, modeParseOnly)
+}
+
+const (
+	modeParseOnly  = iota // Only parse the statement and skip Describe.
+	modeParseAndDescribe  // Parse and describe the statement to get the parameter types from the server.
+)
+
+func (pgConn *PgConn) prepare(ctx context.Context, name, sql string, paramOIDs []uint32, describeMode int) (*StatementDescription, error) {
 	if err := pgConn.lock(); err != nil {
 		return nil, err
 	}
@@ -785,9 +802,21 @@ func (pgConn *PgConn) Prepare(ctx context.Context, name, sql string, paramOIDs [
 		defer pgConn.contextWatcher.Unwatch()
 	}
 
+	psd := &StatementDescription{Name: name, SQL: sql}
+
 	buf := pgConn.wbuf
 	buf = (&pgproto3.Parse{Name: name, Query: sql, ParameterOIDs: paramOIDs}).Encode(buf)
-	buf = (&pgproto3.Describe{ObjectType: 'S', Name: name}).Encode(buf)
+	switch describeMode {
+	case modeParseOnly:
+		// Only parse the statement and use the parameter OIDs that were submitted by the client. Skip requesting
+		// parameter info from the server.
+		psd.ParamOIDs = make([]uint32, len(paramOIDs))
+		copy(psd.ParamOIDs, paramOIDs)
+		break
+	case modeParseAndDescribe:
+	default:
+		buf = (&pgproto3.Describe{ObjectType: 'S', Name: name}).Encode(buf)
+	}
 	buf = (&pgproto3.Sync{}).Encode(buf)
 
 	n, err := pgConn.conn.Write(buf)
@@ -795,8 +824,6 @@ func (pgConn *PgConn) Prepare(ctx context.Context, name, sql string, paramOIDs [
 		pgConn.asyncClose()
 		return nil, &writeError{err: err, safeToRetry: n == 0}
 	}
-
-	psd := &StatementDescription{Name: name, SQL: sql}
 
 	var parseErr error
 
@@ -1104,6 +1131,7 @@ func (pgConn *PgConn) execExtendedPrefix(ctx context.Context, paramValues [][]by
 }
 
 func (pgConn *PgConn) execExtendedSuffix(buf []byte, result *ResultReader) {
+	fmt.Printf("describe portal\n")
 	buf = (&pgproto3.Describe{ObjectType: 'P'}).Encode(buf)
 	buf = (&pgproto3.Execute{}).Encode(buf)
 	buf = (&pgproto3.Sync{}).Encode(buf)

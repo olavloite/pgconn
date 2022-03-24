@@ -36,6 +36,22 @@ type Cache interface {
 	Mode() int
 }
 
+// CacheWithParamOIDs prepares and caches prepared statement descriptions. It uses the given param OIDs that are
+// submitted by the client application to save one round trip to the server, by skipping the DescribeStatement message.
+type CacheWithParamOIDs interface {
+	Cache
+
+	// GetExec returns the prepared statement description for a sql statement that will not return any rows. It will
+	// prepare or describe the sql on the server as needed. The given param OIDs will be used to construct the parse
+	// message. The DescribeStatement message will be skipped, reducing the number of round trips to the server by one.
+	GetExec(ctx context.Context, sql string, paramOIDs []uint32) (*pgconn.StatementDescription, error)
+
+	// GetQuery returns the prepared statement description for a sql statement that will return rows. It will
+	// prepare or describe the sql on the server as needed. The given param OIDs will be used to construct the parse
+	// message.
+	GetQuery(ctx context.Context, sql string, paramOIDs []uint32) (*pgconn.StatementDescription, error)
+}
+
 // New returns the preferred cache implementation for mode and cap. mode is either ModePrepare or ModeDescribe. cap is
 // the maximum size of the cache.
 func New(conn *pgconn.PgConn, mode int, cap int) Cache {
