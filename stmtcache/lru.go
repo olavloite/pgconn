@@ -10,6 +10,10 @@ import (
 )
 
 var lruCount uint64
+const (
+	query = iota
+	exec
+)
 
 // LRU implements Cache with a Least Recently Used (LRU) cache.
 type LRU struct {
@@ -42,18 +46,23 @@ func NewLRU(conn *pgconn.PgConn, mode int, cap int) *LRU {
 
 // Get returns the prepared statement description for sql preparing or describing the sql on the server as needed.
 func (c *LRU) Get(ctx context.Context, sql string) (*pgconn.StatementDescription, error) {
-	return c.get(ctx, sql, nil)
+	return c.get(ctx, sql, query, nil)
 }
 
-// GetWithParamOIDs returns the prepared statement description for sql preparing or describing the sql on the server as
+// GetExec returns the prepared statement description for sql preparing or describing the sql on the server as
 // needed. It will include the parameter OIDs in the Parse message and skip the DescribeStatement message to save one
-// round trip to the server if all parameter OIDs are unequal to Unspecified, and the statement will not return any
-// rows, which means that we don't need a RowDescription.
-func (c *LRU) GetWithParamOIDs(ctx context.Context, sql string, paramOIDs []uint32) (*pgconn.StatementDescription, error) {
-	return c.get(ctx, sql, paramOIDs)
+// round trip to the server if all parameter OIDs are unequal to Unspecified.
+func (c *LRU) GetExec(ctx context.Context, sql string, paramOIDs []uint32) (*pgconn.StatementDescription, error) {
+	return c.get(ctx, sql, exec, paramOIDs)
 }
 
-func (c *LRU) get(ctx context.Context, sql string, paramOIDs []uint32) (*pgconn.StatementDescription, error) {
+// GetQuery returns the prepared statement description for sql preparing or describing the sql on the server as
+// needed. It will include the parameter OIDs in the Parse message.
+func (c *LRU) GetQuery(ctx context.Context, sql string, paramOIDs []uint32) (*pgconn.StatementDescription, error) {
+	return c.get(ctx, sql, query, paramOIDs)
+}
+
+func (c *LRU) get(ctx context.Context, sql string, mode int, paramOIDs []uint32) (*pgconn.StatementDescription, error) {
 	if ctx != context.Background() {
 		select {
 		case <-ctx.Done():
@@ -85,7 +94,7 @@ func (c *LRU) get(ctx context.Context, sql string, paramOIDs []uint32) (*pgconn.
 		}
 	}
 
-	psd, err := c.prepare(ctx, sql, paramOIDs)
+	psd, err := c.prepare(ctx, sql, mode, paramOIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -159,14 +168,16 @@ func (c *LRU) Mode() int {
 	return c.mode
 }
 
-func (c *LRU) prepare(ctx context.Context, sql string, paramOIDs []uint32) (*pgconn.StatementDescription, error) {
+func (c *LRU) prepare(ctx context.Context, sql string, mode int, paramOIDs []uint32) (*pgconn.StatementDescription, error) {
 	var name string
 	if c.mode == ModePrepare {
 		name = fmt.Sprintf("%s_%d", c.psNamePrefix, c.prepareCount)
 		c.prepareCount += 1
 	}
 
-	if paramOIDs == nil {
+	// If we don't have any parameter OIDs, or it is a query that needs a RowDescription, we need to do a full cycle
+	// with DescribeStatement. Otherwise, we can take a shortcut and only send a Parse message.
+	if paramOIDs == nil || mode == query {
 		return c.conn.Prepare(ctx, name, sql, paramOIDs)
 	}
 	return c.conn.Parse(ctx, name, sql, paramOIDs)

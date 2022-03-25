@@ -8,7 +8,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"github.com/jackc/pgproto3"
 	"io"
 	"math"
 	"net"
@@ -782,8 +781,8 @@ func (pgConn *PgConn) Parse(ctx context.Context, name, sql string, paramOIDs []u
 }
 
 const (
-	modeParseOnly  = iota // Only parse the statement and skip Describe.
-	modeParseAndDescribe  // Parse and describe the statement to get the parameter types from the server.
+	modeParseOnly  = iota // Only parse the statement and skip describe.
+	modeParseAndDescribe  // Parse and describe the statement.
 )
 
 func (pgConn *PgConn) prepare(ctx context.Context, name, sql string, paramOIDs []uint32, describeMode int) (*StatementDescription, error) {
@@ -806,15 +805,12 @@ func (pgConn *PgConn) prepare(ctx context.Context, name, sql string, paramOIDs [
 
 	buf := pgConn.wbuf
 	buf = (&pgproto3.Parse{Name: name, Query: sql, ParameterOIDs: paramOIDs}).Encode(buf)
-	switch describeMode {
-	case modeParseOnly:
+	if describeMode == modeParseOnly {
 		// Only parse the statement and use the parameter OIDs that were submitted by the client. Skip requesting
 		// parameter info from the server.
 		psd.ParamOIDs = make([]uint32, len(paramOIDs))
 		copy(psd.ParamOIDs, paramOIDs)
-		break
-	case modeParseAndDescribe:
-	default:
+	} else {
 		buf = (&pgproto3.Describe{ObjectType: 'S', Name: name}).Encode(buf)
 	}
 	buf = (&pgproto3.Sync{}).Encode(buf)
@@ -1131,7 +1127,6 @@ func (pgConn *PgConn) execExtendedPrefix(ctx context.Context, paramValues [][]by
 }
 
 func (pgConn *PgConn) execExtendedSuffix(buf []byte, result *ResultReader) {
-	fmt.Printf("describe portal\n")
 	buf = (&pgproto3.Describe{ObjectType: 'P'}).Encode(buf)
 	buf = (&pgproto3.Execute{}).Encode(buf)
 	buf = (&pgproto3.Sync{}).Encode(buf)
